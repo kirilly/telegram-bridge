@@ -13,7 +13,7 @@ Telegram Bot API
 channel-server.ts (MCP channel server)
       |  stdin/stdout
       v
-Claude Code (--dangerously-skip-permissions)
+Claude Code (--dangerously-load-development-channels server:tg)
 ```
 
 1. `channel-server.ts` polls the Telegram Bot API via [grammY](https://grammy.dev/)
@@ -52,20 +52,20 @@ Supports: text messages, photos (downloaded to `/tmp/tg-images/`), reply threadi
        "tg": {
          "type": "stdio",
          "command": "bun",
-         "args": ["run", "/path/to/telegram-bridge/channel-server.ts"],
-         "env": {
-           "TELEGRAM_BOT_TOKEN": "your_token",
-           "TG_ALLOWED_USERS": "your_user_id"
-         }
+         "args": ["run", "/path/to/telegram-bridge/channel-server.ts"]
        }
      }
    }
    ```
 
-4. **Start Claude Code:**
+   > **Note:** Env vars in `mcpServers.env` may not reach Bun correctly. Bun auto-loads `.env` from the bridge directory — that's the reliable way to pass config.
+
+4. **Start Claude Code** with the channel flag:
    ```bash
-   claude --dangerously-skip-permissions
+   claude --dangerously-load-development-channels server:tg --dangerously-skip-permissions
    ```
+
+   The `--dangerously-load-development-channels server:tg` flag is **required** — it enables the [MCP channel protocol](https://code.claude.com/docs/en/channels-reference) so Telegram messages flow into your session. Without it, the MCP server provides tools but won't push messages. This is a hidden flag during the [channels research preview](https://code.claude.com/docs/en/channels).
 
 5. **Message your bot** on Telegram. Claude receives it and replies.
 
