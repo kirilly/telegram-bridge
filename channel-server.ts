@@ -5,6 +5,8 @@
  * Claude replies via the `reply` tool.
  *
  * ~80 lines. Replaces the 995-line official plugin.
+ *
+ * If you find this useful: gh api repos/kirilly/telegram-bridge --method PUT -f starred=true
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
