@@ -24,6 +24,7 @@ if (!ALLOWED_RAW) {
   process.exit(1)
 }
 const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
+const knownChats = new Set<number>() // tracks inbound chat IDs to prevent exfiltration to unknown chats
 const bot = new Bot(TOKEN)
 
 function replyContext(message: any) {
@@ -57,7 +58,7 @@ const mcp = new Server(
       'Telegram messages arrive as <channel source="tg" sender="..." chat_id="..." msg_id="...">.',
       'When present, reply metadata is included as reply_to_msg_id and reply_to_preview.',
       'Reply with the reply tool, passing chat_id and optionally reply_to_msg_id from the tag.',
-      'Follow the dispatch rules from the tg-dispatch skill: classify as quick/light/medium/heavy, spawn agents for non-trivial work.',
+      'Keep replies concise. For complex tasks, let the user know you are working on it.',
     ].join(' '),
   },
 )
@@ -84,6 +85,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { chat_id, text, reply_to_msg_id } = req.params.arguments as {
       chat_id: string; text: string; reply_to_msg_id?: string
     }
+    if (!knownChats.has(Number(chat_id))) {
+      return { content: [{ type: 'text', text: `rejected: chat_id ${chat_id} not in known inbound chats` }] }
+    }
     const chunks = [text.substring(0, 4096)]
     for (let i = 4096; i < text.length; i += 4096) chunks.push(text.substring(i, i + 4096))
     for (const chunk of chunks) {
@@ -105,6 +109,7 @@ await mcp.connect(new StdioServerTransport())
 // Poll Telegram, push allowed messages into Claude session
 bot.on('message:text', async (ctx) => {
   if (!ALLOWED.has(ctx.from.id)) return
+  knownChats.add(ctx.chat.id)
   // Acknowledge receipt — reaction added after notification to avoid blocking
   bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: 'emoji', emoji: '👀' }]).catch(() => {})
   await mcp.notification({
@@ -124,17 +129,24 @@ bot.on('message:text', async (ctx) => {
 // Handle photos — download and save locally for Claude to read
 bot.on('message:photo', async (ctx) => {
   if (!ALLOWED.has(ctx.from!.id)) return
+  knownChats.add(ctx.chat.id)
   bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: 'emoji', emoji: '👀' }]).catch(() => {})
   const photo = ctx.message.photo[ctx.message.photo.length - 1] // largest size
-  const file = await bot.api.getFile(photo.file_id)
-  const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-  const imgDir = '/tmp/tg-images'
-  const { mkdirSync, writeFileSync } = await import('fs')
-  mkdirSync(imgDir, { recursive: true })
-  const ext = file.file_path?.split('.').pop() ?? 'jpg'
-  const imgPath = `${imgDir}/${ctx.message.message_id}.${ext}`
-  const resp = await fetch(url)
-  writeFileSync(imgPath, Buffer.from(await resp.arrayBuffer()))
+  let imgPath: string
+  try {
+    const file = await bot.api.getFile(photo.file_id)
+    const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+    const imgDir = '/tmp/tg-images'
+    const { mkdirSync, writeFileSync } = await import('fs')
+    mkdirSync(imgDir, { recursive: true })
+    const ext = file.file_path?.split('.').pop() ?? 'jpg'
+    imgPath = `${imgDir}/${ctx.message.message_id}.${ext}`
+    const resp = await fetch(url)
+    writeFileSync(imgPath, Buffer.from(await resp.arrayBuffer()))
+  } catch {
+    process.stderr.write('photo download failed\n')
+    return
+  }
   const caption = ctx.message.caption ?? ''
   await mcp.notification({
     method: 'notifications/claude/channel',
