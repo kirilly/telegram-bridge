@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.env
+tg-channel-list.md
+inbox/
+outbox/
+bun.lock
