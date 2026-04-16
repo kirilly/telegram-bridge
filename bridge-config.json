@@ -1,11 +1,11 @@
 {
   "bot_token_env": "TELEGRAM_BOT_TOKEN",
-  "allowed_users": [1318890498],
+  "allowed_users_env": "TG_ALLOWED_USERS",
   "log_file": "bridge.log",
   "poll_timeout": 30,
   "ci_sources": {
     "_comment": "Future: GitHub CI notification sender IDs and chat targets",
     "enabled": false,
-    "notify_chat_id": 1318890498
+    "notify_chat_id_env": "TG_CHAT_ID"
   }
 }

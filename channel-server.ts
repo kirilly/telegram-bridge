@@ -11,6 +11,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Bot } from 'grammy'
+import { appendFileSync, mkdirSync } from 'fs'
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 if (!TOKEN) {
@@ -18,8 +19,58 @@ if (!TOKEN) {
   process.exit(1)
 }
 
-const ALLOWED = new Set((process.env.TG_ALLOWED_USERS ?? '1318890498').split(',').map(Number))
+const ALLOWED_RAW = process.env.TG_ALLOWED_USERS
+if (!ALLOWED_RAW) {
+  process.stderr.write('TG_ALLOWED_USERS required (comma-separated user IDs)\n')
+  process.exit(1)
+}
+const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
 const bot = new Bot(TOKEN)
+const FEEDBACK_LOG =
+  process.env.TG_FEEDBACK_LOG ??
+  process.env.JOB_SEARCH_FEEDBACK_LOG ??
+  '/home/dev/harness/0-skills/personal/telegram/state/feedback-events.jsonl'
+const CHANNEL_PREVIEW_LIMIT = 240
+const FEEDBACK_PREVIEW_LIMIT = 2000
+
+function replyContext(message: any) {
+  const replied = message.reply_to_message
+  if (!replied) return {}
+  const repliedText = replied.text ?? replied.caption ?? ''
+  const preview = repliedText.replace(/\s+/g, ' ').trim().slice(0, CHANNEL_PREVIEW_LIMIT)
+  return {
+    reply_to_msg_id: String(replied.message_id),
+    reply_to_preview: preview,
+  }
+}
+
+function withReplyPrefix(content: string, message: any) {
+  const replied = message.reply_to_message
+  if (!replied) return content
+  const repliedText = replied.text ?? replied.caption ?? ''
+  const preview = repliedText.replace(/\s+/g, ' ').trim().slice(0, CHANNEL_PREVIEW_LIMIT)
+  if (!preview) return `[Reply to msg ${replied.message_id}]\n\n${content}`
+  return `[Reply to msg ${replied.message_id}: ${preview}]\n\n${content}`
+}
+
+function logFeedback(message: any) {
+  const replied = message.reply_to_message
+  if (!replied?.from?.is_bot) return
+  const text = message.text ?? message.caption ?? ''
+  const fullReplyText = (replied.text ?? replied.caption ?? '').replace(/\s+/g, ' ').trim()
+  const preview = fullReplyText.slice(0, FEEDBACK_PREVIEW_LIMIT)
+  const dir = FEEDBACK_LOG.split('/').slice(0, -1).join('/')
+  mkdirSync(dir, { recursive: true })
+  appendFileSync(FEEDBACK_LOG, `${JSON.stringify({
+    ts: new Date().toISOString(),
+    chat_id: String(message.chat.id),
+    msg_id: String(message.message_id),
+    text,
+    reply_to_msg_id: String(replied.message_id),
+    reply_to_preview: preview,
+    reply_to_text: fullReplyText,
+  })}\n`)
+}
 
 const mcp = new Server(
   { name: 'tg', version: '0.1.0' },
@@ -30,6 +81,7 @@ const mcp = new Server(
     },
     instructions: [
       'Telegram messages arrive as <channel source="tg" sender="..." chat_id="..." msg_id="...">.',
+      'When present, reply metadata is included as reply_to_msg_id and reply_to_preview.',
       'Reply with the reply tool, passing chat_id and optionally reply_to_msg_id from the tag.',
       'Follow the dispatch rules from the tg-dispatch skill: classify as quick/light/medium/heavy, spawn agents for non-trivial work.',
     ].join(' '),
@@ -79,16 +131,18 @@ await mcp.connect(new StdioServerTransport())
 // Poll Telegram, push allowed messages into Claude session
 bot.on('message:text', async (ctx) => {
   if (!ALLOWED.has(ctx.from.id)) return
+  logFeedback(ctx.message)
   // Acknowledge receipt — reaction added after notification to avoid blocking
   bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: 'emoji', emoji: '👀' }]).catch(() => {})
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: ctx.message.text,
+      content: withReplyPrefix(ctx.message.text, ctx.message),
       meta: {
         sender: ctx.from.username ?? String(ctx.from.id),
         chat_id: String(ctx.chat.id),
         msg_id: String(ctx.message.message_id),
+        ...replyContext(ctx.message),
       },
     },
   })
@@ -112,12 +166,13 @@ bot.on('message:photo', async (ctx) => {
   await mcp.notification({
     method: 'notifications/claude/channel',
     params: {
-      content: `[Image saved to ${imgPath}] ${caption}`.trim(),
+      content: withReplyPrefix(`[Image saved to ${imgPath}] ${caption}`.trim(), ctx.message),
       meta: {
         sender: ctx.from!.username ?? String(ctx.from!.id),
         chat_id: String(ctx.chat.id),
         msg_id: String(ctx.message.message_id),
         image_path: imgPath,
+        ...replyContext(ctx.message),
       },
     },
   })
