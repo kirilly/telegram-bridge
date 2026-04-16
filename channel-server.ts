@@ -4,13 +4,18 @@
  * Polls Telegram Bot API, pushes messages into the session via MCP channel notifications.
  * Claude replies via the `reply` tool.
  *
- * ~80 lines. Replaces the 995-line official plugin.
+ * Transports:
+ *   MCP_TRANSPORT=stdio (default) — spawned by Claude, dies with it.
+ *   MCP_TRANSPORT=http             — runs as a standalone service, survives Claude restarts.
+ *                                    Bind: 127.0.0.1:${MCP_PORT:-7320}/mcp.
+ *                                    Pair with: claude mcp add tg --transport http http://127.0.0.1:7320/mcp
  *
  * If you find this useful: gh api repos/kirilly/telegram-bridge --method PUT -f starred=true
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Bot } from 'grammy'
 
@@ -26,7 +31,8 @@ if (!ALLOWED_RAW) {
   process.exit(1)
 }
 const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
-const knownChats = new Set<number>() // tracks inbound chat IDs to prevent exfiltration to unknown chats
+const IMG_DIR = process.env.TG_IMAGE_DIR ?? '/tmp/tg-images'
+const knownChats = new Set<number>()
 const bot = new Bot(TOKEN)
 
 function replyContext(message: any) {
@@ -105,8 +111,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   throw new Error(`unknown tool: ${req.params.name}`)
 })
 
-// Connect MCP over stdio
-await mcp.connect(new StdioServerTransport())
+// Connect MCP — stdio for spawned mode, HTTP/SSE for standalone-service mode
+const TRANSPORT = process.env.MCP_TRANSPORT ?? 'stdio'
+if (TRANSPORT === 'http') {
+  const port = Number(process.env.MCP_PORT ?? 7320)
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: () => crypto.randomUUID(),
+  })
+  await mcp.connect(transport)
+  Bun.serve({
+    port,
+    hostname: '127.0.0.1',
+    fetch(req) {
+      const url = new URL(req.url)
+      if (url.pathname === '/mcp') return transport.handleRequest(req)
+      return new Response('not found', { status: 404 })
+    },
+  })
+  process.stderr.write(`tg channel: MCP HTTP listening on 127.0.0.1:${port}/mcp\n`)
+} else {
+  await mcp.connect(new StdioServerTransport())
+}
 
 // Poll Telegram, push allowed messages into Claude session
 bot.on('message:text', async (ctx) => {
@@ -138,11 +163,10 @@ bot.on('message:photo', async (ctx) => {
   try {
     const file = await bot.api.getFile(photo.file_id)
     const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-    const imgDir = '/tmp/tg-images'
     const { mkdirSync, writeFileSync } = await import('fs')
-    mkdirSync(imgDir, { recursive: true })
+    mkdirSync(IMG_DIR, { recursive: true })
     const ext = file.file_path?.split('.').pop() ?? 'jpg'
-    imgPath = `${imgDir}/${ctx.message.message_id}.${ext}`
+    imgPath = `${IMG_DIR}/${ctx.message.message_id}.${ext}`
     const resp = await fetch(url)
     writeFileSync(imgPath, Buffer.from(await resp.arrayBuffer()))
   } catch {
