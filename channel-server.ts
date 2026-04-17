@@ -18,6 +18,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import { Bot } from 'grammy'
+import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { dirname } from 'path'
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN
 if (!TOKEN) {
@@ -32,8 +34,63 @@ if (!ALLOWED_RAW) {
 }
 const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
 const IMG_DIR = process.env.TG_IMAGE_DIR ?? '/tmp/tg-images'
+const QUEUE_PATH = process.env.QUEUE_PATH ?? '/home/dev/telegram/queue.jsonl'
+mkdirSync(dirname(QUEUE_PATH), { recursive: true })
 const knownChats = new Set<number>()
 const bot = new Bot(TOKEN)
+
+// Append-only JSONL crash-recovery log. Each line is either:
+//   {type:'recv', ts, msg_id, params}   — message received, pushed to Claude
+//   {type:'ack',  ts, msg_id}           — Claude acknowledged via reply tool
+// On startup we rebuild pending = recv msg_ids not yet acked, replay them, and
+// rewrite the log with just those pending records (compaction).
+function logRecv(params: any) {
+  appendFileSync(QUEUE_PATH, JSON.stringify({ type: 'recv', ts: Date.now(), msg_id: params.meta.msg_id, params }) + '\n')
+}
+function logAck(msg_id: string) {
+  appendFileSync(QUEUE_PATH, JSON.stringify({ type: 'ack', ts: Date.now(), msg_id }) + '\n')
+}
+function loadPending(): any[] {
+  if (!existsSync(QUEUE_PATH)) return []
+  const recv = new Map<string, any>()
+  const acked = new Set<string>()
+  for (const line of readFileSync(QUEUE_PATH, 'utf8').split('\n')) {
+    if (!line) continue
+    try {
+      const r = JSON.parse(line)
+      if (r.type === 'recv') recv.set(r.msg_id, r.params)
+      else if (r.type === 'ack') acked.add(r.msg_id)
+    } catch {}
+  }
+  const pending: any[] = []
+  for (const [id, params] of recv) if (!acked.has(id)) pending.push(params)
+  return pending
+}
+function compactOnStartup(pending: any[]) {
+  const lines = pending.map(p => JSON.stringify({ type: 'recv', ts: Date.now(), msg_id: p.meta.msg_id, params: p }))
+  writeFileSync(QUEUE_PATH, lines.length ? lines.join('\n') + '\n' : '')
+  for (const p of pending) {
+    if (p.meta?.chat_id) knownChats.add(Number(p.meta.chat_id))
+  }
+}
+
+// Inspect the claude-tg tmux pane to see if Claude Code is parked on the
+// rate-limit modal. Returns '' if pane not readable or no modal detected.
+function detectRateLimitModal(): string {
+  try {
+    const uid = process.getuid?.() ?? 1000
+    const socket = `/tmp/tmux-${uid}/default`
+    const { spawnSync } = require('child_process')
+    const res = spawnSync('tmux', ['-S', socket, 'capture-pane', '-t', 'claude-tg', '-p'], { encoding: 'utf8', timeout: 2000 })
+    const pane = (res.stdout as string) ?? ''
+    if (pane.includes('Stop and wait for limit to reset')) {
+      const m = pane.match(/resets\s+([^\n]+?)(?:\s*\(UTC\))?/i)
+      const when = m?.[1]?.trim()
+      return when ? `rate-limited (resets ${when})` : 'rate-limited'
+    }
+  } catch {}
+  return ''
+}
 
 function replyContext(message: any) {
   const replied = message.reply_to_message
@@ -66,6 +123,7 @@ const mcp = new Server(
       'Telegram messages arrive as <channel source="tg" sender="..." chat_id="..." msg_id="...">.',
       'When present, reply metadata is included as reply_to_msg_id and reply_to_preview.',
       'Reply with the reply tool, passing chat_id and optionally reply_to_msg_id from the tag.',
+      'ALWAYS pass ack_msg_id set to the msg_id from the tag so the bridge can mark the message processed (prevents re-delivery after crashes).',
       'Keep replies concise. For complex tasks, let the user know you are working on it.',
     ].join(' '),
   },
@@ -82,6 +140,7 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         chat_id: { type: 'string', description: 'Telegram chat ID from the channel tag' },
         text: { type: 'string', description: 'Message text to send' },
         reply_to_msg_id: { type: 'string', description: 'Optional: message ID to reply to' },
+        ack_msg_id: { type: 'string', description: 'Optional: msg_id from the channel tag — passing this marks the incoming message as processed so it is not re-delivered after a crash.' },
       },
       required: ['chat_id', 'text'],
     },
@@ -90,8 +149,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === 'reply') {
-    const { chat_id, text, reply_to_msg_id } = req.params.arguments as {
-      chat_id: string; text: string; reply_to_msg_id?: string
+    const { chat_id, text, reply_to_msg_id, ack_msg_id } = req.params.arguments as {
+      chat_id: string; text: string; reply_to_msg_id?: string; ack_msg_id?: string
     }
     if (!knownChats.has(Number(chat_id))) {
       return { content: [{ type: 'text', text: `rejected: chat_id ${chat_id} not in known inbound chats` }] }
@@ -106,7 +165,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         return bot.api.sendMessage(Number(chat_id), chunk)
       })
     }
-    return { content: [{ type: 'text', text: `sent ${text.length} chars to ${chat_id}` }] }
+    if (ack_msg_id) logAck(ack_msg_id)
+    return { content: [{ type: 'text', text: `sent ${text.length} chars to ${chat_id}${ack_msg_id ? ` (acked ${ack_msg_id})` : ''}` }] }
   }
   throw new Error(`unknown tool: ${req.params.name}`)
 })
@@ -139,18 +199,23 @@ bot.on('message:text', async (ctx) => {
   knownChats.add(ctx.chat.id)
   // Acknowledge receipt — reaction added after notification to avoid blocking
   bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: 'emoji', emoji: '👀' }]).catch(() => {})
-  await mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content: withReplyPrefix(ctx.message.text, ctx.message),
-      meta: {
-        sender: ctx.from.username ?? String(ctx.from.id),
-        chat_id: String(ctx.chat.id),
-        msg_id: String(ctx.message.message_id),
-        ...replyContext(ctx.message),
-      },
+  const params = {
+    content: withReplyPrefix(ctx.message.text, ctx.message),
+    meta: {
+      sender: ctx.from.username ?? String(ctx.from.id),
+      chat_id: String(ctx.chat.id),
+      msg_id: String(ctx.message.message_id),
+      ...replyContext(ctx.message),
     },
-  })
+  }
+  logRecv(params)
+  const modalState = detectRateLimitModal()
+  if (modalState) {
+    bot.api.sendMessage(ctx.chat.id, `⏳ ${modalState} — your message is queued and I will process it when Claude resumes.`, {
+      reply_to_message_id: ctx.message.message_id,
+    }).catch(() => {})
+  }
+  await mcp.notification({ method: 'notifications/claude/channel', params })
 })
 
 // Handle photos — download and save locally for Claude to read
@@ -174,19 +239,24 @@ bot.on('message:photo', async (ctx) => {
     return
   }
   const caption = ctx.message.caption ?? ''
-  await mcp.notification({
-    method: 'notifications/claude/channel',
-    params: {
-      content: withReplyPrefix(`[Image saved to ${imgPath}] ${caption}`.trim(), ctx.message),
-      meta: {
-        sender: ctx.from!.username ?? String(ctx.from!.id),
-        chat_id: String(ctx.chat.id),
-        msg_id: String(ctx.message.message_id),
-        image_path: imgPath,
-        ...replyContext(ctx.message),
-      },
+  const params = {
+    content: withReplyPrefix(`[Image saved to ${imgPath}] ${caption}`.trim(), ctx.message),
+    meta: {
+      sender: ctx.from!.username ?? String(ctx.from!.id),
+      chat_id: String(ctx.chat.id),
+      msg_id: String(ctx.message.message_id),
+      image_path: imgPath,
+      ...replyContext(ctx.message),
     },
-  })
+  }
+  logRecv(params)
+  const modalState = detectRateLimitModal()
+  if (modalState) {
+    bot.api.sendMessage(ctx.chat.id, `⏳ ${modalState} — your message is queued and I will process it when Claude resumes.`, {
+      reply_to_message_id: ctx.message.message_id,
+    }).catch(() => {})
+  }
+  await mcp.notification({ method: 'notifications/claude/channel', params })
 })
 
 // Catch-all for other message types to avoid silent drops
@@ -205,4 +275,18 @@ bot.catch((err) => {
 
 const me = await bot.api.getMe()
 process.stderr.write(`tg channel: @${me.username} ready, allowed: [${[...ALLOWED]}]\n`)
+
+// Crash recovery: replay any messages received before the last restart that
+// Claude never acked. Compacts the log to just those entries so it stays small.
+const pending = loadPending()
+compactOnStartup(pending)
+if (pending.length > 0) {
+  process.stderr.write(`tg channel: replaying ${pending.length} unacked message(s)\n`)
+  for (const params of pending) {
+    await mcp.notification({ method: 'notifications/claude/channel', params }).catch((e) => {
+      process.stderr.write(`tg channel: replay failed for msg_id=${params?.meta?.msg_id}: ${e?.message ?? e}\n`)
+    })
+  }
+}
+
 bot.start()
