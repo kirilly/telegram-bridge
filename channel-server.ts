@@ -35,6 +35,7 @@ if (!ALLOWED_RAW) {
 const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
 const IMG_DIR = process.env.TG_IMAGE_DIR ?? '/tmp/tg-images'
 const QUEUE_PATH = process.env.QUEUE_PATH ?? '/home/dev/telegram/queue.jsonl'
+const HTTP_IDLE_TIMEOUT_S = Number(process.env.MCP_HTTP_IDLE_TIMEOUT_S ?? 240)
 mkdirSync(dirname(QUEUE_PATH), { recursive: true })
 const knownChats = new Set<number>()
 const bot = new Bot(TOKEN)
@@ -182,13 +183,14 @@ if (TRANSPORT === 'http') {
   Bun.serve({
     port,
     hostname: '127.0.0.1',
+    idleTimeout: HTTP_IDLE_TIMEOUT_S,
     fetch(req) {
       const url = new URL(req.url)
       if (url.pathname === '/mcp') return transport.handleRequest(req)
       return new Response('not found', { status: 404 })
     },
   })
-  process.stderr.write(`tg channel: MCP HTTP listening on 127.0.0.1:${port}/mcp\n`)
+  process.stderr.write(`tg channel: MCP HTTP listening on 127.0.0.1:${port}/mcp (idleTimeout=${HTTP_IDLE_TIMEOUT_S}s)\n`)
 } else {
   await mcp.connect(new StdioServerTransport())
 }
@@ -215,7 +217,9 @@ bot.on('message:text', async (ctx) => {
       reply_to_message_id: ctx.message.message_id,
     }).catch(() => {})
   }
-  await mcp.notification({ method: 'notifications/claude/channel', params })
+  await mcp.notification({ method: 'notifications/claude/channel', params }).catch((err) => {
+    process.stderr.write(`tg channel: notification failed for msg_id=${params.meta.msg_id}: ${err?.message ?? err}\n`)
+  })
 })
 
 // Handle photos — download and save locally for Claude to read
@@ -256,7 +260,9 @@ bot.on('message:photo', async (ctx) => {
       reply_to_message_id: ctx.message.message_id,
     }).catch(() => {})
   }
-  await mcp.notification({ method: 'notifications/claude/channel', params })
+  await mcp.notification({ method: 'notifications/claude/channel', params }).catch((err) => {
+    process.stderr.write(`tg channel: notification failed for msg_id=${params.meta.msg_id}: ${err?.message ?? err}\n`)
+  })
 })
 
 // Catch-all for other message types to avoid silent drops
