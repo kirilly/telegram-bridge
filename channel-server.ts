@@ -34,6 +34,8 @@ if (!ALLOWED_RAW) {
 }
 const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
 const IMG_DIR = process.env.TG_IMAGE_DIR ?? '/tmp/tg-images'
+const TG_SESSION_NAME = process.env.TG_SESSION_NAME ?? 'claude-tg'
+const TMUX_SOCKET = process.env.TG_TMUX_SOCKET ?? `/tmp/tmux-${process.getuid?.() ?? 1000}/default`
 const QUEUE_PATH = process.env.QUEUE_PATH ?? '/home/dev/telegram/queue.jsonl'
 const HTTP_IDLE_TIMEOUT_S = Number(process.env.MCP_HTTP_IDLE_TIMEOUT_S ?? 240)
 mkdirSync(dirname(QUEUE_PATH), { recursive: true })
@@ -79,12 +81,15 @@ function compactOnStartup(pending: any[]) {
 // rate-limit modal. Returns '' if pane not readable or no modal detected.
 function detectRateLimitModal(): string {
   try {
-    const uid = process.getuid?.() ?? 1000
-    const socket = `/tmp/tmux-${uid}/default`
     const { spawnSync } = require('child_process')
-    const res = spawnSync('tmux', ['-S', socket, 'capture-pane', '-t', 'claude-tg', '-p'], { encoding: 'utf8', timeout: 2000 })
+    const res = spawnSync('tmux', ['-S', TMUX_SOCKET, 'capture-pane', '-t', TG_SESSION_NAME, '-p'], { encoding: 'utf8', timeout: 2000 })
     const pane = (res.stdout as string) ?? ''
-    if (pane.includes('Stop and wait for limit to reset')) {
+    if (
+      pane.includes('Stop and wait for limit to reset') ||
+      pane.includes("You've hit your limit") ||
+      pane.includes('out of extra usage') ||
+      pane.includes('Upgrade to Team plan')
+    ) {
       const m = pane.match(/resets\s+([^\n]+?)(?:\s*\(UTC\))?/i)
       const when = m?.[1]?.trim()
       return when ? `rate-limited (resets ${when})` : 'rate-limited'
