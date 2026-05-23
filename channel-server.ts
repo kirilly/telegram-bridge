@@ -227,7 +227,10 @@ bot.on('message:photo', async (ctx) => {
   if (!ALLOWED.has(ctx.from!.id)) return
   knownChats.add(ctx.chat.id)
   bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: 'emoji', emoji: '👀' }]).catch(() => {})
-  const photo = ctx.message.photo[ctx.message.photo.length - 1] // largest size
+  const photos = ctx.message.photo
+  if (!photos?.length) return
+  const photo = photos[photos.length - 1] // largest size
+  if (!photo) return
   let imgPath: string
   try {
     const file = await bot.api.getFile(photo.file_id)
