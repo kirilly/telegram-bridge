@@ -2,6 +2,9 @@
   "name": "telegram-bridge",
   "module": "index.ts",
   "type": "module",
+  "scripts": {
+    "test": "bash tests/run.sh"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
