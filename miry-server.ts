@@ -277,6 +277,25 @@ function enqueue(params: TelegramParams) {
   processQueue().catch(err => logLine(`queue failed: ${err?.message ?? err}`))
 }
 
+async function dropPendingTelegramUpdates() {
+  await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(err => {
+    logLine(`deleteWebhook drop_pending_updates failed: ${err?.message ?? err}`)
+  })
+
+  try {
+    const updates = await bot.api.getUpdates({ offset: -1, limit: 1, timeout: 0 })
+    const lastUpdateId = updates.length > 0 ? updates[updates.length - 1]?.update_id : undefined
+    if (typeof lastUpdateId === 'number') {
+      await bot.api.getUpdates({ offset: lastUpdateId + 1, limit: 1, timeout: 0 })
+      logLine(`dropped pending Telegram updates through update_id=${lastUpdateId}`)
+    } else {
+      logLine('no pending Telegram updates to drop')
+    }
+  } catch (err: any) {
+    logLine(`getUpdates drop_pending failed: ${err?.message ?? err}`)
+  }
+}
+
 bot.on('message:text', async (ctx) => {
   if (!ALLOWED.has(ctx.from.id)) return
   knownChats.add(ctx.chat.id)
@@ -347,9 +366,7 @@ const me = await bot.api.getMe()
 process.stderr.write(`miry tg: @${me.username} ready, allowed: [${[...ALLOWED]}]\n`)
 logLine(`miry tg ready bot=@${me.username} allowed_count=${ALLOWED.size}`)
 
-await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(err => {
-  logLine(`deleteWebhook drop_pending_updates failed: ${err?.message ?? err}`)
-})
+await dropPendingTelegramUpdates()
 
 const pending = loadPending()
 compactOnStartup(pending)

@@ -116,6 +116,8 @@ grep -q "miry-queue.jsonl" "$MIRY_SOURCE" \
   || fail "T17: Miry must not replay the old Claude queue"
 
 grep -q 'deleteWebhook({ drop_pending_updates: true })' "$MIRY_SOURCE" \
+  && grep -q 'getUpdates({ offset: -1, limit: 1, timeout: 0 })' "$MIRY_SOURCE" \
+  && grep -q 'getUpdates({ offset: lastUpdateId + 1, limit: 1, timeout: 0 })' "$MIRY_SOURCE" \
   && grep -q 'bot.start({ drop_pending_updates: true })' "$MIRY_SOURCE" \
   && ok "T18: Miry drops Telegram pending updates before polling" \
   || fail "T18: Miry must not process stale Telegram update backlog"
