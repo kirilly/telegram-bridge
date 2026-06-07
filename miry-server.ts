@@ -347,6 +347,10 @@ const me = await bot.api.getMe()
 process.stderr.write(`miry tg: @${me.username} ready, allowed: [${[...ALLOWED]}]\n`)
 logLine(`miry tg ready bot=@${me.username} allowed_count=${ALLOWED.size}`)
 
+await bot.api.deleteWebhook({ drop_pending_updates: true }).catch(err => {
+  logLine(`deleteWebhook drop_pending_updates failed: ${err?.message ?? err}`)
+})
+
 const pending = loadPending()
 compactOnStartup(pending)
 if (pending.length > 0) {
@@ -354,4 +358,4 @@ if (pending.length > 0) {
   for (const params of pending) enqueue(params)
 }
 
-bot.start()
+bot.start({ drop_pending_updates: true })

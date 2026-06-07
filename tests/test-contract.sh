@@ -115,4 +115,9 @@ grep -q "miry-queue.jsonl" "$MIRY_SOURCE" \
   && ok "T17: Miry uses a separate queue file from the old Claude bridge" \
   || fail "T17: Miry must not replay the old Claude queue"
 
+grep -q 'deleteWebhook({ drop_pending_updates: true })' "$MIRY_SOURCE" \
+  && grep -q 'bot.start({ drop_pending_updates: true })' "$MIRY_SOURCE" \
+  && ok "T18: Miry drops Telegram pending updates before polling" \
+  || fail "T18: Miry must not process stale Telegram update backlog"
+
 printf '\ntelegram-bridge contract: %d passed, 0 failed\n' "$pass"
