@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SOURCE="$ROOT/channel-server.ts"
+MIRY_SOURCE="$ROOT/miry-server.ts"
 pass=0
 
 ok() {
@@ -60,5 +61,54 @@ grep -q 'detectRateLimitModal' "$SOURCE" \
   && grep -q 'Stop and wait for limit to reset' "$SOURCE" \
   && ok "T8: rate-limit modal queues inbound messages with a notice" \
   || fail "T8: rate-limit queue notice missing"
+
+grep -q 'TELEGRAM_BOT_TOKEN required' "$MIRY_SOURCE" \
+  && grep -q 'TG_ALLOWED_USERS required' "$MIRY_SOURCE" \
+  && ok "T9: Miry requires Telegram token and allowed users" \
+  || fail "T9: Miry required environment guard missing"
+
+grep -q 'if (!ALLOWED.has(ctx.from.id)) return' "$MIRY_SOURCE" \
+  && grep -q 'if (!ALLOWED.has(ctx.from!.id)) return' "$MIRY_SOURCE" \
+  && ok "T10: Miry inbound handlers enforce allowed users" \
+  || fail "T10: Miry allowed-user gate missing"
+
+grep -q 'function logRecv' "$MIRY_SOURCE" \
+  && grep -q 'logRecv(params)' "$MIRY_SOURCE" \
+  && grep -q 'function logAck' "$MIRY_SOURCE" \
+  && grep -q 'logAck(params.meta.msg_id)' "$MIRY_SOURCE" \
+  && ok "T11: Miry preserves queue-before-run and ack-after-reply" \
+  || fail "T11: Miry queue/ack contract missing"
+
+grep -q "return \\['exec', 'resume'" "$MIRY_SOURCE" \
+  && grep -q "'--json'" "$MIRY_SOURCE" \
+  && grep -q "'-o'" "$MIRY_SOURCE" \
+  && grep -q "'--sandbox', CODEX_SANDBOX" "$MIRY_SOURCE" \
+  && grep -q "'--skip-git-repo-check'" "$MIRY_SOURCE" \
+  && ok "T12: Miry invokes Codex exec/resume with JSONL and final-output capture" \
+  || fail "T12: Miry Codex command contract missing"
+
+grep -q 'SESSION_ID_PATH' "$MIRY_SOURCE" \
+  && grep -q 'writeSessionId(result.threadId)' "$MIRY_SOURCE" \
+  && grep -q 'readSessionId()' "$MIRY_SOURCE" \
+  && ok "T13: Miry stores and resumes the Codex session id" \
+  || fail "T13: Miry session-id persistence missing"
+
+if grep -q 'notifications/claude/channel' "$MIRY_SOURCE"; then
+  fail "T14: Miry must not use Claude channel notifications"
+else
+  ok "T14: Miry does not use Claude channel notifications"
+fi
+
+grep -q 'knownChats.has(Number(chatId))' "$MIRY_SOURCE" \
+  && grep -q 'safeText.substring(0, 4096)' "$MIRY_SOURCE" \
+  && ok "T15: Miry outbound replies keep known-chat guard and chunking" \
+  || fail "T15: Miry outbound safety contract missing"
+
+ack_count=$(grep -c 'logAck(params.meta.msg_id)' "$MIRY_SOURCE")
+if [[ "$ack_count" -ge 2 ]] && grep -q 'Miry/Codex failed; this message has been acked after the failure reply' "$MIRY_SOURCE"; then
+  ok "T16: Miry failure replies are acked to prevent replay spam"
+else
+  fail "T16: Miry failure reply ack contract missing"
+fi
 
 printf '\ntelegram-bridge contract: %d passed, 0 failed\n' "$pass"
