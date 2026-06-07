@@ -27,7 +27,7 @@ if (!ALLOWED_RAW) {
 
 const ALLOWED = new Set(ALLOWED_RAW.split(',').map(Number))
 const IMG_DIR = process.env.TG_IMAGE_DIR ?? '/tmp/tg-images'
-const QUEUE_PATH = process.env.QUEUE_PATH ?? '/home/dev/telegram/queue.jsonl'
+const QUEUE_PATH = process.env.QUEUE_PATH ?? '/home/dev/telegram/miry-queue.jsonl'
 const SESSION_ID_PATH = process.env.MIRY_SESSION_ID_PATH ?? '/home/dev/telegram/.miry-last-session-id'
 const MIRY_LOG_PATH = process.env.MIRY_LOG_PATH ?? '/home/dev/telegram/miry.log'
 const CODEX_BIN = process.env.CODEX_BIN ?? 'codex'

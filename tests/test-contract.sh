@@ -111,4 +111,8 @@ else
   fail "T16: Miry failure reply ack contract missing"
 fi
 
+grep -q "miry-queue.jsonl" "$MIRY_SOURCE" \
+  && ok "T17: Miry uses a separate queue file from the old Claude bridge" \
+  || fail "T17: Miry must not replay the old Claude queue"
+
 printf '\ntelegram-bridge contract: %d passed, 0 failed\n' "$pass"
