@@ -122,4 +122,12 @@ grep -q 'deleteWebhook({ drop_pending_updates: true })' "$MIRY_SOURCE" \
   && ok "T18: Miry drops Telegram pending updates before polling" \
   || fail "T18: Miry must not process stale Telegram update backlog"
 
+grep -q 'JOB_SEARCH_FEEDBACK_LOG' "$MIRY_SOURCE" \
+  && grep -q 'looksLikeDailySearchFeedback' "$MIRY_SOURCE" \
+  && grep -q 'recordSearchFeedback' "$MIRY_SOURCE" \
+  && grep -q 'feedback-events.jsonl' "$MIRY_SOURCE" \
+  && grep -q 'Feedback recorded' "$MIRY_SOURCE" \
+  && ok "T19: Miry records daily search feedback replies to local state" \
+  || fail "T19: Miry daily search feedback capture missing"
+
 printf '\ntelegram-bridge contract: %d passed, 0 failed\n' "$pass"
