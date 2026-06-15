@@ -30,6 +30,7 @@ const IMG_DIR = process.env.TG_IMAGE_DIR ?? '/tmp/tg-images'
 const QUEUE_PATH = process.env.QUEUE_PATH ?? '/home/dev/telegram/miry-queue.jsonl'
 const SESSION_ID_PATH = process.env.MIRY_SESSION_ID_PATH ?? '/home/dev/telegram/.miry-last-session-id'
 const MIRY_LOG_PATH = process.env.MIRY_LOG_PATH ?? '/home/dev/telegram/miry.log'
+const JOB_SEARCH_FEEDBACK_LOG = process.env.JOB_SEARCH_FEEDBACK_LOG ?? process.env.TG_FEEDBACK_LOG ?? '/home/dev/.local/state/daily-job-search-vps/feedback-events.jsonl'
 const CODEX_BIN = process.env.CODEX_BIN ?? 'codex'
 const CODEX_CWD = process.env.MIRY_CODEX_CWD ?? process.cwd()
 const CODEX_MODEL = process.env.MIRY_CODEX_MODEL
@@ -68,6 +69,32 @@ function logRecv(params: TelegramParams) {
 
 function logAck(msg_id: string) {
   appendFileSync(QUEUE_PATH, JSON.stringify({ type: 'ack', ts: Date.now(), msg_id }) + '\n')
+}
+
+function looksLikeDailySearchFeedback(message: any): boolean {
+  const text = (message.text ?? '').trim()
+  if (!text || text.startsWith('/')) return false
+  const replied = message.reply_to_message
+  if (!replied) return false
+  const preview = `${replied.text ?? ''}\n${replied.caption ?? ''}`
+  return /Daily (job|gig) search|Lead score:|fit_score|Fit score:|Title:|Company:|Link:/i.test(preview)
+}
+
+function recordSearchFeedback(message: any) {
+  const reply = replyContext(message)
+  const payload = {
+    ts: new Date().toISOString(),
+    source: 'miry-tg',
+    chat_id: String(message.chat.id),
+    msg_id: String(message.message_id),
+    sender: String(message.from?.username ?? message.from?.id ?? ''),
+    text: String(message.text ?? ''),
+    reply_to_msg_id: reply.reply_to_msg_id ?? '',
+    reply_to_preview: reply.reply_to_preview ?? '',
+  }
+  mkdirSync(dirname(JOB_SEARCH_FEEDBACK_LOG), { recursive: true })
+  appendFileSync(JOB_SEARCH_FEEDBACK_LOG, JSON.stringify(payload) + '\n')
+  logLine(`search feedback recorded msg_id=${payload.msg_id} reply_to=${payload.reply_to_msg_id}`)
 }
 
 function loadPending(): TelegramParams[] {
@@ -300,6 +327,13 @@ bot.on('message:text', async (ctx) => {
   if (!ALLOWED.has(ctx.from.id)) return
   knownChats.add(ctx.chat.id)
   bot.api.setMessageReaction(ctx.chat.id, ctx.message.message_id, [{ type: 'emoji', emoji: '👀' }]).catch(() => {})
+  if (looksLikeDailySearchFeedback(ctx.message)) {
+    recordSearchFeedback(ctx.message)
+    bot.api.sendMessage(ctx.chat.id, 'Feedback recorded. The daily feedback review will turn it into a ranking proposal.', {
+      reply_to_message_id: ctx.message.message_id,
+    }).catch(err => logLine(`feedback ack failed msg_id=${ctx.message.message_id}: ${err?.message ?? err}`))
+    return
+  }
   const params: TelegramParams = {
     content: withReplyPrefix(ctx.message.text, ctx.message),
     meta: {
